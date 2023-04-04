@@ -318,7 +318,7 @@ public:
 
     // Exactly equivalent to codeBlock->ownerExecutable()->newReplacementCodeBlockFor(codeBlock->specializationKind())
     CodeBlock* newReplacement();
-    
+
     void setJITCode(Ref<JITCode>&& code)
     {
         if (!code->isShared())
@@ -956,8 +956,23 @@ private:
 #endif
     StructureWatchpointMap m_llintGetByIdWatchpointMap;
     RefPtr<JITCode> m_jitCode;
+    MacroAssemblerCodeRef<JSEntryPtrTag> m_llint_thunk;
+    MacroAssemblerCodeRef<JSEntryPtrTag> m_llint_thunk_arity;
 #if ENABLE(JIT)
 public:
+    void setProfilerThunk(MacroAssemblerCodeRef<JSEntryPtrTag> thunk) {
+      m_llint_thunk = thunk;
+    }
+    void setProfilerArityCheckThunk(MacroAssemblerCodeRef<JSEntryPtrTag> thunk) {
+      m_llint_thunk_arity = thunk;
+    }
+    bool jitCodeIsProfilerThunk() {
+      if (!jitCode() || !m_llint_thunk) {
+        return false;
+      }
+      return jitCode()->addressForCall(ArityCheckNotRequired) == m_llint_thunk.code();
+    }
+
     void* m_jitData { nullptr };
 private:
 #endif
@@ -996,7 +1011,7 @@ private:
 #endif
 };
 #if !ASSERT_ENABLED && COMPILER(GCC_COMPATIBLE)
-static_assert(sizeof(CodeBlock) <= 240, "Keep it small for memory saving");
+static_assert(sizeof(CodeBlock) <= 272, "Keep it small for memory saving");
 #endif
 
 template <typename ExecutableType>

@@ -36,6 +36,7 @@
 #include "WasmContext.h"
 #include <wtf/NeverDestroyed.h>
 
+
 namespace JSC {
 
 #if ENABLE(JIT)
@@ -92,6 +93,70 @@ static MacroAssemblerCodeRef<tag> generateThunkWithJumpTo(OpcodeID opcodeID, con
 }
 
 template<PtrTag tag>
+static MacroAssemblerCodeRef<tag> generateThunkWithJumpToLLIntReturnPoint(LLIntCode target, const char *thunkKind)
+{
+    JSInterfaceJIT jit;
+    assertIsTaggedWith<OperationPtrTag>(target);
+    jit.farJump(CCallHelpers::TrustedImmPtr(target), OperationPtrTag);
+    LinkBuffer patchBuffer(jit, GLOBAL_THUNK_ID, LinkBuffer::Profile::LLIntThunk);
+    return FINALIZE_THUNK(patchBuffer, tag, "LLInt %s return point thunk", thunkKind);
+}
+
+template<PtrTag tag>
+static MacroAssemblerCodeRef<tag> generateThunkWithJumpToLLIntReturnPoint(OpcodeID opcodeID, const char *thunkKind)
+{
+    return generateThunkWithJumpToLLIntReturnPoint<tag>(LLInt::getCodeFunctionPtr<OperationPtrTag>(opcodeID), thunkKind);
+}
+
+template<PtrTag tag>
+static MacroAssemblerCodeRef<tag> generateProfilerThunkWithJumpToPrologue(OpcodeID opcodeID, const char* thunkName)
+{
+    JSInterfaceJIT jit;
+
+    LLIntCode target = LLInt::getCodeFunctionPtr<OperationPtrTag>(opcodeID);
+    assertIsTaggedWith<OperationPtrTag>(target);
+
+    CCallHelpers::RegisterID scratch   = JSInterfaceJIT::regT0;
+    CCallHelpers::RegisterID callerFP  = JSInterfaceJIT::regT1;
+    CCallHelpers::RegisterID endAddr = JSInterfaceJIT::regT2;
+
+    // save caller fp
+    jit.move(JSInterfaceJIT::framePointerRegister, callerFP);
+    jit.subPtr(CCallHelpers::TrustedImm32(8), callerFP);
+
+    // prologue
+    jit.emitFunctionPrologue();
+
+    // compute end copy address (currentFP+16)
+    jit.move(JSInterfaceJIT::framePointerRegister, endAddr);
+    jit.addPtr(CCallHelpers::TrustedImm32(8), endAddr);
+
+    // Copy
+    {
+      CCallHelpers::Label loopBegin = jit.label();
+      CCallHelpers::Jump loopDone = jit.branchPtr(CCallHelpers::Equal, callerFP, endAddr);
+
+      jit.loadPtr(CCallHelpers::Address(callerFP, 0), scratch);
+      jit.push(scratch);
+
+      jit.subPtr(CCallHelpers::TrustedImm32(8), callerFP);
+      jit.jump().linkTo(loopBegin, &jit);
+      loopDone.link(&jit);
+    }
+
+    // Call into target
+    jit.move(JSInterfaceJIT::TrustedImmPtr(target), scratch);
+    jit.call(scratch, OperationPtrTag);
+
+    // Epilogue
+    jit.emitFunctionEpilogue();
+    jit.ret();
+
+    LinkBuffer patchBuffer(jit, GLOBAL_THUNK_ID, LinkBuffer::Profile::LLIntThunk);
+    return FINALIZE_THUNK(patchBuffer, tag, thunkName);
+}
+
+template<PtrTag tag>
 static MacroAssemblerCodeRef<tag> generateThunkWithJumpToPrologue(OpcodeID opcodeID, const char *thunkKind)
 {
     JSInterfaceJIT jit;
@@ -112,20 +177,11 @@ static MacroAssemblerCodeRef<tag> generateThunkWithJumpToPrologue(OpcodeID opcod
     return FINALIZE_THUNK(patchBuffer, tag, "LLInt %s jump to prologue thunk", thunkKind);
 }
 
-template<PtrTag tag>
-static MacroAssemblerCodeRef<tag> generateThunkWithJumpToLLIntReturnPoint(LLIntCode target, const char *thunkKind)
+MacroAssemblerCodeRef<JSEntryPtrTag> functionForCallEntryThunk(const char* thunkName) 
 {
-    JSInterfaceJIT jit;
-    assertIsTaggedWith<OperationPtrTag>(target);
-    jit.farJump(CCallHelpers::TrustedImmPtr(target), OperationPtrTag);
-    LinkBuffer patchBuffer(jit, GLOBAL_THUNK_ID, LinkBuffer::Profile::LLIntThunk);
-    return FINALIZE_THUNK(patchBuffer, tag, "LLInt %s return point thunk", thunkKind);
-}
-
-template<PtrTag tag>
-static MacroAssemblerCodeRef<tag> generateThunkWithJumpToLLIntReturnPoint(OpcodeID opcodeID, const char *thunkKind)
-{
-    return generateThunkWithJumpToLLIntReturnPoint<tag>(LLInt::getCodeFunctionPtr<OperationPtrTag>(opcodeID), thunkKind);
+    MacroAssemblerCodeRef<JSEntryPtrTag> codeRef;
+    codeRef = generateProfilerThunkWithJumpToPrologue<JSEntryPtrTag>(llint_function_for_call_prologue, thunkName);
+    return codeRef;
 }
 
 MacroAssemblerCodeRef<JSEntryPtrTag> functionForCallEntryThunk()
@@ -135,6 +191,13 @@ MacroAssemblerCodeRef<JSEntryPtrTag> functionForCallEntryThunk()
     std::call_once(onceKey, [&] {
         codeRef.construct(generateThunkWithJumpToPrologue<JSEntryPtrTag>(llint_function_for_call_prologue, "function for call"));
     });
+    return codeRef;
+}
+
+MacroAssemblerCodeRef<JSEntryPtrTag> functionForConstructEntryThunk(const char* thunkName)
+{
+    MacroAssemblerCodeRef<JSEntryPtrTag> codeRef;
+    codeRef = generateProfilerThunkWithJumpToPrologue<JSEntryPtrTag>(llint_function_for_construct_prologue, thunkName);
     return codeRef;
 }
 
@@ -158,6 +221,13 @@ MacroAssemblerCodeRef<JSEntryPtrTag> functionForCallArityCheckThunk()
     return codeRef;
 }
 
+MacroAssemblerCodeRef<JSEntryPtrTag> functionForCallArityCheckThunk(const char* thunkName)
+{
+    MacroAssemblerCodeRef<JSEntryPtrTag> codeRef;
+    codeRef = generateProfilerThunkWithJumpToPrologue<JSEntryPtrTag>(llint_function_for_call_arity_check, thunkName);
+    return codeRef;
+}
+
 MacroAssemblerCodeRef<JSEntryPtrTag> functionForConstructArityCheckThunk()
 {
     static LazyNeverDestroyed<MacroAssemblerCodeRef<JSEntryPtrTag>> codeRef;
@@ -165,6 +235,13 @@ MacroAssemblerCodeRef<JSEntryPtrTag> functionForConstructArityCheckThunk()
     std::call_once(onceKey, [&] {
         codeRef.construct(generateThunkWithJumpToPrologue<JSEntryPtrTag>(llint_function_for_construct_arity_check, "function for construct with arity check"));
     });
+    return codeRef;
+}
+
+MacroAssemblerCodeRef<JSEntryPtrTag> functionForConstructArityCheckThunk(const char* thunkName)
+{
+    MacroAssemblerCodeRef<JSEntryPtrTag> codeRef;
+    codeRef = generateProfilerThunkWithJumpToPrologue<JSEntryPtrTag>(llint_function_for_construct_arity_check, thunkName);
     return codeRef;
 }
 
@@ -178,6 +255,13 @@ MacroAssemblerCodeRef<JSEntryPtrTag> evalEntryThunk()
     return codeRef;
 }
 
+MacroAssemblerCodeRef<JSEntryPtrTag> evalEntryThunk(const char* thunkName)
+{
+    MacroAssemblerCodeRef<JSEntryPtrTag> codeRef;
+    codeRef = generateProfilerThunkWithJumpToPrologue<JSEntryPtrTag>(llint_eval_prologue, thunkName);
+    return codeRef;
+}
+
 MacroAssemblerCodeRef<JSEntryPtrTag> programEntryThunk()
 {
     static LazyNeverDestroyed<MacroAssemblerCodeRef<JSEntryPtrTag>> codeRef;
@@ -185,6 +269,13 @@ MacroAssemblerCodeRef<JSEntryPtrTag> programEntryThunk()
     std::call_once(onceKey, [&] {
         codeRef.construct(generateThunkWithJumpToPrologue<JSEntryPtrTag>(llint_program_prologue, "program"));
     });
+    return codeRef;
+}
+
+MacroAssemblerCodeRef<JSEntryPtrTag> programEntryThunk(const char* thunkName)
+{
+    MacroAssemblerCodeRef<JSEntryPtrTag> codeRef;
+    codeRef = generateProfilerThunkWithJumpToPrologue<JSEntryPtrTag>(llint_program_prologue, thunkName);
     return codeRef;
 }
 
